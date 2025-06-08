@@ -2,5 +2,7 @@
   "prompt": "この画像について、写っている物と場所を詳しく説明してください。",
   "image": "https://storage.googleapis.com/zenn-user-upload/82968d23b6c5-20250228.jpg",
   "max_new_tokens": 1024,
-  "temperature": 0.1
+  "temperature": 0.7,
+  "num_beams": 5,
+  "repetition_penalty": 1.5
 }

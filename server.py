@@ -87,9 +87,11 @@ app = FastAPI(title="Asagi-Vision API", version="0.1.0", root_path=ROOT_PATH, li
 
 class AsagiGenerateRequest(BaseModel):
     prompt: str = Field(..., description="User's text prompt for the model.")
-    image: str | None = Field(default=None, description="URL or Base64 encoded image data.")
-    max_new_tokens: int | None = Field(default=128, ge=1, description="Maximum number of new tokens to generate.")
-    temperature: float | None = Field(default=0.0, ge=0.0, le=2.0, description="Sampling temperature.")
+    image: Optional[str] = Field(default=None, description="URL or Base64 encoded image data.")
+    max_new_tokens: int = Field(default=256, gt=0, description="Maximum number of new tokens to generate.")
+    temperature: Optional[float] = Field(default=0.7, ge=0.0, le=2.0, description="Sampling temperature.")
+    num_beams: Optional[int] = Field(default=5, ge=1, description="Number of beams for beam search.")
+    repetition_penalty: Optional[float] = Field(default=1.5, ge=1.0, description="Repetition penalty.")
 
 
 class AsagiGenerateResponse(BaseModel):
@@ -198,17 +200,26 @@ async def generate_handler(request_data: AsagiGenerateRequest) -> AsagiGenerateR
         inputs = final_inputs
         logger.debug("Inputs prepared (with tokenizer override for text if image present) and moved to device.")
 
-        temp_for_generation = request_data.temperature
-        if temp_for_generation is None:
-            # Pydantic default is 0.0 if field omitted; if null, it's None here.
-            # Model.generate usually defaults temperature to 1.0 if not provided or if None implies default.
-            # Let's use 0.0 to be consistent with Pydantic's omission default.
-            temp_for_generation = 0.0
+        # Retrieve generation parameters from the request, using Pydantic defaults if not provided.
+        # These defaults are now aligned with Asagi-2B's model card recommendations.
+        final_temperature = request_data.temperature
+        final_num_beams = request_data.num_beams
+        final_repetition_penalty = request_data.repetition_penalty
+
+        # Determine do_sample logic based on temperature and num_beams, aligning with Asagi-2B's example config.
+        # Asagi's example: do_sample=True, num_beams=5, temperature=0.7
+        # If user sets temperature to 0.0, it implies greedy, so do_sample should be False.
+        if final_temperature == 0.0:
+            final_do_sample = False
+        else:
+            final_do_sample = True # Default to True if temperature > 0.0, as in Asagi's example
 
         generate_kwargs = {
             "max_new_tokens": request_data.max_new_tokens,
-            "temperature": temp_for_generation,
-            "do_sample": temp_for_generation > 0.0,
+            "temperature": final_temperature,
+            "num_beams": final_num_beams,
+            "repetition_penalty": final_repetition_penalty,
+            "do_sample": final_do_sample,
         }
         if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
             if processor.tokenizer.pad_token_id is not None:
