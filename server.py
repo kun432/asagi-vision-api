@@ -138,8 +138,8 @@ async def generate_handler(request_data: AsagiGenerateRequest) -> AsagiGenerateR
                         raise HTTPException(status_code=400, detail="Base64 string contains invalid characters.")
 
                     image_bytes = base64.b64decode(base64_data_str.encode("ascii"))
-                    pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-                    images_for_processor = [pil_image]
+                    image_pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                    # images_for_processor is no longer used, image_pil is used directly
                     logger.info("Base64 image decoded and converted to RGB successfully.")
                 except binascii.Error as e:
                     logger.error(f"Invalid base64 encoding: {e}")
@@ -150,17 +150,53 @@ async def generate_handler(request_data: AsagiGenerateRequest) -> AsagiGenerateR
                     logger.error(f"Error processing base64 image: {e}", exc_info=True)
                     raise HTTPException(status_code=500, detail=f"Error processing base64 image: {str(e)}") from e
 
+        # Prepare inputs for the Asagi model
+        # Define effective_prompt based on Asagi's expected format if an image is present
+        if image_pil:
+            effective_prompt = (
+                f"以下は、タスクを説明する指示です。要求を適切に満たす応答を書きなさい。\n\n"
+                f"### 指示:\n<image>\n{request_data.prompt}\n\n### 応答:\n"
+            )
+        else:
+            effective_prompt = request_data.prompt
+
         logger.debug(
-            f"Preparing inputs for processor. Text: {text_prompt_for_model!r}, "
-            f"Images: {len(images_for_processor) if images_for_processor is not None else 0} image(s)"
+            f"Preparing inputs for processor. Effective Prompt: {effective_prompt!r}, "
+            f"Image: {'Present' if image_pil else 'Not present'}"
         )
-        inputs = processor(
-            text=[text_prompt_for_model],
-            images=images_for_processor,
-            padding=True,
-            return_tensors="pt",
-        ).to(device)
-        logger.debug("Inputs prepared and moved to device.")
+
+        if image_pil:
+            inputs_dict = processor(
+                text=effective_prompt, images=image_pil, return_tensors="pt", padding=True, truncation=True
+            )
+        else:
+            inputs_dict = processor(
+                text=effective_prompt, images=None, return_tensors="pt", padding=True, truncation=True
+            )
+
+        # According to Asagi documentation, explicitly set input_ids and attention_mask from tokenizer for text part
+        # This is crucial when images are present, ensuring <image> token is correctly processed.
+        # If no image, this effectively re-tokenizes the same prompt, which is redundant but harmless.
+        # For consistency and to ensure the tokenizer used by `processor` for text matches what `model.generate` expects for `input_ids`,
+        # we re-tokenize the `effective_prompt` to get `input_ids` and `attention_mask`.
+        inputs_text_tokenized = processor.tokenizer(effective_prompt, return_tensors="pt", padding=True, truncation=True)
+        inputs_dict['input_ids'] = inputs_text_tokenized['input_ids']
+        inputs_dict['attention_mask'] = inputs_text_tokenized['attention_mask']
+
+        final_inputs = {}
+        for k, v_tensor in inputs_dict.items():
+            if k == "token_type_ids":
+                continue  # Skip token_type_ids as it's not used by some models like Asagi
+            if torch.is_tensor(v_tensor):
+                if v_tensor.dtype == torch.float32 and model.dtype == torch.bfloat16:
+                    final_inputs[k] = v_tensor.to(model.dtype).to(model.device)
+                # input_ids (torch.long) and others should only be moved to model.device
+                else:
+                    final_inputs[k] = v_tensor.to(model.device)
+            else:
+                final_inputs[k] = v_tensor # Should not happen for standard processor output
+        inputs = final_inputs
+        logger.debug("Inputs prepared (with tokenizer override for text if image present) and moved to device.")
 
         temp_for_generation = request_data.temperature
         if temp_for_generation is None:
@@ -196,15 +232,24 @@ async def generate_handler(request_data: AsagiGenerateRequest) -> AsagiGenerateR
 
         # Remove the input prompt from the generated text
         # (as per asagi-2b.md example, though it handles <image> tag differently)
-        prompt_text_for_removal = request_data.prompt
-        if generated_text_with_prompt.startswith(prompt_text_for_removal):
+        # Use the same effective_prompt that was fed to the model for removal
+        prompt_text_for_removal = effective_prompt
+        # Asagi's example also removes <image> placeholder from prompt before stripping, if present
+        if "<image>" in prompt_text_for_removal:
+            prompt_text_for_removal_cleaned = prompt_text_for_removal.replace("<image>", " ") # Replace with space as per example
+        else:
+            prompt_text_for_removal_cleaned = prompt_text_for_removal
+
+        if generated_text_with_prompt.startswith(prompt_text_for_removal_cleaned):
+            output_text = generated_text_with_prompt[len(prompt_text_for_removal_cleaned):]
+        elif generated_text_with_prompt.startswith(prompt_text_for_removal): # Fallback for safety, if cleaned version didn't match but original did
             output_text = generated_text_with_prompt[len(prompt_text_for_removal):]
         else:
-            # If the generated text doesn't start with the prompt, log a warning and use the full text.
+            # If the generated text doesn't start with the prompt (neither cleaned nor original), log a warning and use the full text.
             # This might happen if the model's output format is unexpected.
             logger.warning(
                 f"Generated text does not start with the input prompt. "
-                f"Prompt: {prompt_text_for_removal!r}, Generated: {generated_text_with_prompt!r}"
+                f"Cleaned Prompt for removal: {prompt_text_for_removal_cleaned!r}, Original Prompt: {prompt_text_for_removal!r}, Generated: {generated_text_with_prompt!r}"
             )
             output_text = generated_text_with_prompt
 
