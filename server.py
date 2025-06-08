@@ -158,7 +158,7 @@ async def generate_handler(request_data: AsagiGenerateRequest) -> AsagiGenerateR
         if image_pil:
             effective_prompt = (
                 f"以下は、タスクを説明する指示です。要求を適切に満たす応答を書きなさい。\n\n"
-                f"### 指示:\n<image>\n{request_data.prompt}\n\n### 応答:\n"
+                f"### 指示:\n<image>\nこの画像を見て、次の質問に詳細かつ具体的に答えてください。\n\n{request_data.prompt}\n\n### 応答:\n"
             )
         else:
             effective_prompt = request_data.prompt
