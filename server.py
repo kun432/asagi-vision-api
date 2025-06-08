@@ -13,7 +13,8 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from PIL import Image
-from pydantic import BaseModel, Field  # Moved to top with other third-party imports
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any  # Moved to top with other third-party imports
 from transformers import AutoModel, AutoProcessor, BitsAndBytesConfig
 
 # Load environment variables from .env file
