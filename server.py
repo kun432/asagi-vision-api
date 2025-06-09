@@ -14,7 +14,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from PIL import Image
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any  # Moved to top with other third-party imports
 from transformers import AutoModel, AutoProcessor, BitsAndBytesConfig
 
 # Load environment variables from .env file
@@ -44,7 +43,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Application startup via lifespan...")
     global model, processor
     model_path = MODEL_NAME
-    logger.info(f"Loading Asagi-Vision model and processor from {model_path}...") # device is determined by device_map="auto"
+    logger.info(
+        f"Loading Asagi-Vision model and processor from {model_path}..."
+    )  # device is determined by device_map="auto"
     logger.info(f"Quantization mode: {QUANTIZATION_MODE}")
 
     quantization_config_params = {}
@@ -70,7 +71,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         model = AutoModel.from_pretrained(model_path, **model_kwargs)
         # device will be set by device_map="auto", update global device if needed for other parts
         global device
-        device = model.device # Update global device based on where the model is loaded
+        device = model.device  # Update global device based on where the model is loaded
         logger.info(f"Asagi-Vision model and processor loaded successfully on {device}.")
     except Exception as e:
         logger.error(f"Error loading Asagi-Vision model/processor: {e}", exc_info=True)
@@ -88,11 +89,11 @@ app = FastAPI(title="Asagi-Vision API", version="0.1.0", root_path=ROOT_PATH, li
 
 class AsagiGenerateRequest(BaseModel):
     prompt: str = Field(..., description="User's text prompt for the model.")
-    image: Optional[str] = Field(default=None, description="URL or Base64 encoded image data.")
+    image: str | None = Field(default=None, description="URL or Base64 encoded image data.")
     max_new_tokens: int = Field(default=256, gt=0, description="Maximum number of new tokens to generate.")
-    temperature: Optional[float] = Field(default=0.7, ge=0.0, le=2.0, description="Sampling temperature.")
-    num_beams: Optional[int] = Field(default=5, ge=1, description="Number of beams for beam search.")
-    repetition_penalty: Optional[float] = Field(default=1.5, ge=1.0, description="Repetition penalty.")
+    temperature: float | None = Field(default=0.7, ge=0.0, le=2.0, description="Sampling temperature.")
+    num_beams: int | None = Field(default=5, ge=1, description="Number of beams for beam search.")
+    repetition_penalty: float | None = Field(default=1.5, ge=1.0, description="Repetition penalty.")
 
 
 class AsagiGenerateResponse(BaseModel):
@@ -158,7 +159,10 @@ async def generate_handler(request_data: AsagiGenerateRequest) -> AsagiGenerateR
         if image_pil:
             effective_prompt = (
                 f"以下は、タスクを説明する指示です。要求を適切に満たす応答を書きなさい。\n\n"
-                f"### 指示:\n<image>\nこの画像を見て、次の質問に詳細かつ具体的に答えてください。\n\n{request_data.prompt}\n\n### 応答:\n"
+                f"### 指示:\n<image>\n"
+                "この画像を見て、次の質問に詳細かつ具体的に答えてください。\n\n"
+                "{request_data.prompt}\n\n"
+                "### 応答:\n"
             )
         else:
             effective_prompt = request_data.prompt
@@ -180,11 +184,13 @@ async def generate_handler(request_data: AsagiGenerateRequest) -> AsagiGenerateR
         # According to Asagi documentation, explicitly set input_ids and attention_mask from tokenizer for text part
         # This is crucial when images are present, ensuring <image> token is correctly processed.
         # If no image, this effectively re-tokenizes the same prompt, which is redundant but harmless.
-        # For consistency and to ensure the tokenizer used by `processor` for text matches what `model.generate` expects for `input_ids`,
-        # we re-tokenize the `effective_prompt` to get `input_ids` and `attention_mask`.
-        inputs_text_tokenized = processor.tokenizer(effective_prompt, return_tensors="pt", padding=True, truncation=True)
-        inputs_dict['input_ids'] = inputs_text_tokenized['input_ids']
-        inputs_dict['attention_mask'] = inputs_text_tokenized['attention_mask']
+        # For consistency and to ensure the tokenizer used by `processor` for text matches what `model.generate`
+        # expects for `input_ids`, we re-tokenize the `effective_prompt` to get `input_ids` and `attention_mask`.
+        inputs_text_tokenized = processor.tokenizer(
+            effective_prompt, return_tensors="pt", padding=True, truncation=True
+        )
+        inputs_dict["input_ids"] = inputs_text_tokenized["input_ids"]
+        inputs_dict["attention_mask"] = inputs_text_tokenized["attention_mask"]
 
         final_inputs = {}
         for k, v_tensor in inputs_dict.items():
@@ -197,7 +203,7 @@ async def generate_handler(request_data: AsagiGenerateRequest) -> AsagiGenerateR
                 else:
                     final_inputs[k] = v_tensor.to(model.device)
             else:
-                final_inputs[k] = v_tensor # Should not happen for standard processor output
+                final_inputs[k] = v_tensor  # Should not happen for standard processor output
         inputs = final_inputs
         logger.debug("Inputs prepared (with tokenizer override for text if image present) and moved to device.")
 
@@ -213,7 +219,7 @@ async def generate_handler(request_data: AsagiGenerateRequest) -> AsagiGenerateR
         if final_temperature == 0.0:
             final_do_sample = False
         else:
-            final_do_sample = True # Default to True if temperature > 0.0, as in Asagi's example
+            final_do_sample = True  # Default to True if temperature > 0.0, as in Asagi's example
 
         generate_kwargs = {
             "max_new_tokens": request_data.max_new_tokens,
@@ -248,20 +254,26 @@ async def generate_handler(request_data: AsagiGenerateRequest) -> AsagiGenerateR
         prompt_text_for_removal = effective_prompt
         # Asagi's example also removes <image> placeholder from prompt before stripping, if present
         if "<image>" in prompt_text_for_removal:
-            prompt_text_for_removal_cleaned = prompt_text_for_removal.replace("<image>", " ") # Replace with space as per example
+            prompt_text_for_removal_cleaned = prompt_text_for_removal.replace(
+                "<image>", " "
+            )  # Replace with space as per example
         else:
             prompt_text_for_removal_cleaned = prompt_text_for_removal
 
         if generated_text_with_prompt.startswith(prompt_text_for_removal_cleaned):
-            output_text = generated_text_with_prompt[len(prompt_text_for_removal_cleaned):]
-        elif generated_text_with_prompt.startswith(prompt_text_for_removal): # Fallback for safety, if cleaned version didn't match but original did
-            output_text = generated_text_with_prompt[len(prompt_text_for_removal):]
+            output_text = generated_text_with_prompt[len(prompt_text_for_removal_cleaned) :]
+        elif generated_text_with_prompt.startswith(
+            prompt_text_for_removal
+        ):  # Fallback for safety, if cleaned version didn't match but original did
+            output_text = generated_text_with_prompt[len(prompt_text_for_removal) :]
         else:
-            # If the generated text doesn't start with the prompt (neither cleaned nor original), log a warning and use the full text.
+            # If the generated text doesn't start with the prompt (neither cleaned nor original),
+            # log a warning and use the full text.
             # This might happen if the model's output format is unexpected.
             logger.warning(
                 f"Generated text does not start with the input prompt. "
-                f"Cleaned Prompt for removal: {prompt_text_for_removal_cleaned!r}, Original Prompt: {prompt_text_for_removal!r}, Generated: {generated_text_with_prompt!r}"
+                f"Cleaned Prompt for removal: {prompt_text_for_removal_cleaned!r}, "
+                f"Original Prompt: {prompt_text_for_removal!r}, Generated: {generated_text_with_prompt!r}"
             )
             output_text = generated_text_with_prompt
 
